@@ -1,6 +1,6 @@
 {
   "name": "@notesify/auth",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "A secure, decoupled Express and Mongoose session authentication library featuring refresh token rotation, replay detection, and device auditing.",
   "main": "src/index.js",
   "scripts": {

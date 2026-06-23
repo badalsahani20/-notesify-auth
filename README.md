@@ -1,91 +1,280 @@
 # @notesify/auth
 
-<!-- Badges -->
-![NPM Version](https://img.shields.io/badge/npm-v1.0.0-blue?style=flat-square)
-![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
-![TypeScript](https://img.shields.io/badge/types-TypeScript-blue?style=flat-square)
-![Tests Status](https://img.shields.io/badge/tests-passing-brightgreen?style=flat-square)
-![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen?style=flat-square)
-![Downloads](https://img.shields.io/badge/downloads-10k%2B-blue?style=flat-square)
+> A modular, security-first authentication engine for Express applications with Mongoose support.
+>
+> Designed around session lifecycle management, refresh token rotation, replay attack detection, and decoupled storage adapters.
 
 ---
 
-Modern web authentication is far more than just generating JWTs. 
+## Why does this exist?
 
-To meet production security standards, modern applications need:
-* 📱 **Multi-device Login** (session tracking across different devices).
-* ⚙️ **Session Management** (active session lists and audits).
-* 🔄 **Refresh Token Rotation (RTR)** (invalidating old refresh credentials).
-* 🚨 **Replay Attack Detection** (automatic session revocation on token reuse).
-* 🔍 **Device Auditing** (parsing Browser, OS, IP, and location context).
-* 🚪 **Logout Everywhere** (remote session invalidation).
+Modern web authentication is much more than issuing JWTs.
 
-`@notesify/auth` provides all of these capabilities out of the box through a modular, database-agnostic, and event-driven architecture.
+Production applications often require:
+
+* 🔐 Short-lived access tokens
+* 🔄 Refresh token rotation (RTR)
+* 🚨 Replay attack detection
+* 📱 Multi-device session management
+* 🔍 Device auditing
+* 🚪 Logout from individual devices
+* ⚙️ Configurable authentication flows
+* 📬 Pluggable notification providers
+
+Most implementations solve these problems inside application-specific controllers and models.
+
+`@notesify/auth` extracts them into a reusable authentication engine that remains independent of storage implementations and notification services.
 
 ---
 
-## Architecture Design
+## Core Design Principles
 
-```mermaid
-flowchart TD
-    client[User Client] -->|API Requests| createAuth["createAuth() Factory"]
-    createAuth --> router[Express Router]
-    createAuth --> adapter[Storage Adapter]
-    createAuth --> events[Event Hooks]
-    
-    adapter -->|State Audit| sessionDB[(AuthSession DB)]
-    events -->|Notify| notifyService[Mail / SMS Services]
+Every architectural decision follows a few simple principles inspired by the **Single Responsibility Principle**.
+
+### 1. Authentication is its own domain
+```text
+User
+  ↓ (Represents Identity)
+Identity
+
+AuthSession
+  ↓ (Represents Authentication State)
+Authentication State
+```
+User data and authentication state are intentionally separated. The library treats the user's document as read-only identity records and encapsulates active session states separately.
+
+### 2. Storage should be replaceable
+```text
+Authentication Engine
+          │
+          ▼
+   Storage Adapter
+          │
+    ┌─────┴─────┐
+    ▼           ▼
+Mongoose     Future Adapters
+```
+Business logic never directly depends on database implementations. Storage is accessed through a common interface, allowing the engine to adapt to different ORMs/ODMs without code modification.
+
+### 3. Notifications belong to the application
+Instead of sending emails or messages internally:
+```text
+Register
+   │
+   ▼
+Emit Event
+   │
+   ▼
+Application Decides:
+  Email (Nodemailer, SendGrid, Resend)
+  SMS / Push Notification
+  Discord Webhook
+  Custom Event Bus
+```
+The authentication engine remains completely notification provider-agnostic, emitting events to the parent application's lifecycles.
+
+---
+
+## Architecture
+
+```text
+                    createAuth()
+                          │
+                          ▼
+              Authentication Engine
+                          │
+      ┌───────────────────┼───────────────────┐
+      ▼                   ▼                   ▼
+   Router            Auth Middleware      Event Hooks
+                          │
+                          ▼
+                  Storage Adapter
+                          │
+                          ▼
+                     Persistence
 ```
 
-### Refresh Token Rotation (RTR) & Replay Mitigation
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Client as User Client
-    participant App as Express App
-    participant Auth as @notesify/auth
-    participant DB as Database (AuthSession)
-
-    Client->>App: POST /login (Credentials)
-    App->>Auth: Validate Credentials
-    Auth->>DB: Create Session (Store tokenHash, sessionId, UA, IP)
-    Auth-->>Client: Access Token (15m JSON) & Refresh Token (7d HttpOnly Cookie)
-    
-    Note over Client, DB: Token Rotation & Replay Mitigation
-    Client->>App: POST /refresh (Presents Refresh Cookie)
-    App->>Auth: Validate Token & Lookup Session
-    Auth->>DB: Compare tokenHash
-    alt Token Hash Matches
-        Auth->>DB: Update Session with Rotated tokenHash & Updated Metadata
-        Auth-->>Client: New Access Token & New Rotated Refresh Cookie
-    else Token Hash Reused (Breach Detected!)
-        Note over Auth, DB: Replay Attack Detected: Token already rotated
-        Auth->>DB: Revoke all active sessions for User
-        Auth-->>Client: 401 Unauthorized (Force Re-login)
-    end
-```
+Every component has a single responsibility.
 
 ---
 
-## Why This Architecture?
+## Refresh Token Lifecycle
 
-Experienced backend engineers prioritize clear design patterns and trade-offs. Here is the rationale behind `@notesify/auth`:
+```text
+Login
+   │
+   ▼
+Access Token (15m)
+Refresh Token (7d)
+   │
+   ▼
+POST /refresh
+   │
+   ▼
+Validate Current Refresh Token
+   │
+   ▼
+Generate New Refresh Token
+   │
+   ▼
+Invalidate Previous Refresh Token
+   │
+   ▼
+Return Updated Authentication Pair
+```
 
-### 1. Why separate `AuthSession`?
-* **Separation of Concerns**: Storing session tokens inside an array on the main `User` document leads to document bloating, slow index lookups, and exceeds MongoDB's 16MB document size limit for high-activity accounts.
-* **Independent TTL Cleanup**: By storing sessions separately, database engines can use high-efficiency TTL (Time-To-Live) indexes to automatically clean up expired sessions without locking the `User` collection.
-* **Device Audit Trails**: Storing metadata (IP, OS, Browser, activity) separately makes it easy to support account activity dashboards and specific session revocation.
+Only the newest refresh token remains valid.
 
-### 2. Why use a `StorageAdapter`?
-* **Database Independence**: The core authentication controllers and middlewares are completely decoupled from database models. 
-* **Seamless Field Mapping**: Developers can plug in their existing User models without modifying schema keys (e.g. mapping `email` vs. `primaryEmail`).
-* **Testability**: Decoupling allows for mock database adapters during unit testing, preventing external database dependencies in test environments.
+---
 
-### 3. Why use Refresh Token Rotation (RTR)?
-* **Replay Attack Mitigation**: If a refresh token is stolen, the attacker can only use it once. The moment either the legitimate user or the attacker attempts to reuse a rotated token, all sessions are immediately invalidated.
-* **Constant-Time Verification**: All token comparisons use constant-time evaluations (`timingSafeCompare`) to shield the server from side-channel timing analysis attacks.
-* **Concurrency Grace Period**: Network delays can trigger duplicate refresh requests. The library implements a configurable concurrency grace period (default 10s) to tolerate lag without logging users out by mistake.
+## Replay Attack Protection
+
+A replay attack occurs when a previously rotated refresh token is reused.
+
+```text
+User
+ │
+ └── Refresh Token A
+
+Refresh Token A
+        │
+        ▼
+Rotated
+        │
+        ▼
+Refresh Token B
+
+Attacker
+        │
+        ▼
+Attempts Refresh Token A Again
+        │
+        ▼
+Replay Detected
+        │
+        ▼
+Revoke Every Active Session
+        │
+        ▼
+401 Unauthorized
+```
+
+The library intentionally prioritizes account security over preserving active sessions.
+
+---
+
+## Why AuthSession?
+
+Instead of embedding refresh tokens inside the User document:
+```text
+User
+ ├── name
+ ├── email
+ └── password
+```
+and
+```text
+AuthSession
+ ├── userId
+ ├── tokenHash
+ ├── device
+ ├── browser
+ ├── ip
+ ├── lastUsedAt
+ └── expiresAt
+```
+remain separate.
+
+### Advantages:
+* **Better separation of concerns**: Session states do not pollute identity records.
+* **Rich session metadata**: Allows parsing browser, OS, and client IP without bloating the main user schema.
+* **Independent TTL cleanup**: Deletes expired sessions cleanly using MongoDB's TTL index without locking the main user collection.
+* **Device management**: Simplifies querying active devices and auditing activity.
+* **Easier auditing**: Retains historical audit trails independently of active profile updates.
+
+---
+
+## Why StorageAdapter?
+
+Authentication logic should not know whether data comes from:
+* Mongoose
+* Prisma
+* Drizzle
+* Redis
+* A custom database implementation
+
+The adapter layer maps application-specific models into a common interface, allowing the authentication engine to remain reusable, decoupled, and easily testable.
+
+---
+
+## Security Model
+
+The library applies multiple defensive layers:
+
+### Credentials
+* bcrypt password hashing (10 rounds)
+* Password fields excluded from queries by default
+
+### Session Protection
+* SHA-256 hashed refresh tokens (protects against database leaks bypassing passwords)
+* HttpOnly, Secure cookies
+* Configurable SameSite policy
+
+### Session Lifecycle
+* Refresh Token Rotation (RTR)
+* Replay attack detection and automatic session revocation
+* Automatic session expiration cleanup via MongoDB TTL indexes
+
+### Verification
+* Timing-safe token comparison (using `crypto.timingSafeEqual`) to prevent side-channel analysis
+* Multi-session isolation
+* Device auditing
+
+---
+
+## Built-in Session Management
+
+Every authenticated session automatically tracks:
+```text
+Session ID
+Browser
+Operating System
+Device Type
+IP Address
+Created At
+Last Used At
+Current Session
+```
+making features like:
+```text
+Current Devices
+
+Chrome • Windows (Active Now)
+Safari • macOS (Last active: Yesterday)
+Chrome • Android (Last active: 2 days ago)
+
+[Logout this device]
+```
+available without additional implementation.
+
+---
+
+## Design Trade-Offs & FAQ
+
+### Why use refresh cookies instead of localStorage?
+Storing access or refresh tokens in `localStorage` makes them susceptible to Cross-Site Scripting (XSS) attacks. If an attacker injects a script, they can read `localStorage` instantly. By placing the refresh token inside an `HttpOnly` cookie, client-side scripts cannot access it.
+
+### Why hash refresh tokens?
+If an attacker breaches your MongoDB database and steals the tables, they cannot decrypt passwords because they are bcrypt-hashed. However, if refresh tokens are stored in plain text, the attacker can copy them, set them as cookies in their browser, and bypass authentication completely. Hashing refresh tokens with SHA-256 ensures that a compromised database does not compromise active sessions.
+
+### Why revoke every session after replay detection?
+If a refresh token is reused, we have no way of knowing whether the legitimate user or the attacker reached the endpoint first. To guarantee account integrity, the library invalidates all active sessions for that user, neutralizing the stolen token and forcing a clean re-login.
+
+### Why separate AuthSession instead of using arrays inside the User document?
+Embedding refresh tokens inside the User document couples authentication state with user identity. It makes advanced session management, auditing, TTL cleanup, and tracking richer metadata difficult. A dedicated `AuthSession` collection separates responsibilities and scales naturally as authentication requirements evolve.
+
+### Why use a database lookup on Access Tokens?
+A purely stateless JWT setup cannot revoke access tokens before they naturally expire. To support instant "Log out this device" and "Logout everywhere" features, the library does a quick indexed database lookup on the `sessionId` in our auth middleware. We trade a tiny query latency for the ability to instantly lock out blacklisted devices.
 
 ---
 
@@ -141,12 +330,12 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-// Initialize the Mongoose Storage Adapter with Custom Field Mapping
+// Initialize Mongoose Adapter with Custom Field Mapping
 const adapter = new MongooseStorageAdapter({
     userModel: User,
     sessionModel: AuthSession,
     fields: {
-        email: "email",                  // Maps abstract fields to your actual schema fields
+        email: "email",                  
         password: "passwordHash",
         isVerified: "isVerified",
         verificationToken: "emailVerifyToken",
@@ -174,11 +363,9 @@ const auth = createAuth({
     },
     events: {
         onVerifyEmail: async ({ user, verificationUrl }) => {
-            // Trigger email dispatch (Nodemailer, SendGrid, Resend, etc.)
             console.log(`Verification link: ${verificationUrl}`);
         },
         onForgotPassword: async ({ user, resetUrl }) => {
-            // Trigger password reset email dispatch
             console.log(`Password reset link: ${resetUrl}`);
         }
     }
@@ -195,56 +382,21 @@ app.get("/api/dashboard", auth.authMiddleware, (req, res) => {
 
 ---
 
-## Built-in Device & Session Management
+## Built-in API Endpoints
 
-The library provides built-in endpoints for device auditing and session control. Once routes are mounted (e.g., under `/api/auth`), these routes become available automatically:
-
-### 1. `GET /sessions`
-Returns a list of all active sessions for the logged-in user with parsed User-Agent strings.
-* **Response**:
-```json
-{
-  "success": true,
-  "sessions": [
-    {
-      "id": "6856af09-f808-47c5-ba59-194452ca13ec",
-      "device": "Desktop",
-      "os": "macOS",
-      "browser": "Safari",
-      "ip": "127.0.0.1",
-      "lastUsedAt": "2026-06-23T16:22:50.000Z",
-      "current": true
-    },
-    {
-      "id": "f2fa6c78-f808-47c5-ba59-194452ca13ec",
-      "device": "Mobile",
-      "os": "iOS",
-      "browser": "Chrome",
-      "ip": "192.168.1.10",
-      "lastUsedAt": "2026-06-23T15:10:00.000Z",
-      "current": false
-    }
-  ]
-}
-```
-
-### 2. `DELETE /sessions/:id`
-Terminates a specific session, logging out that device.
-
-### 3. `DELETE /sessions`
-Terminates all sessions for the user *except* the currently active one (Logout other devices).
-
----
-
-## Security Guarantees
-
-- **Hashed Passwords**: Auto-hashed on register via `bcrypt` (10 rounds).
-- **Hashed Session Keys**: Refresh tokens are stored as SHA-256 hashes in the database to prevent plain-text hijacking on db compromise.
-- **Timing-Safe Password Checks**: Constant-time string matching prevents database and password timing attacks.
-- **HttpOnly Cookies**: Prevents client-side scripts (XSS) from reading the refresh token.
-- **SameSite Protection**: Configurable SameSite cookie policy prevents Cross-Site Request Forgery (CSRF).
-- **Automated Replay Protection**: Refresh Token Rotation tracks old tokens. If an old token is resubmitted, the library assumes a theft breach and invalidates *all* sessions for that user instantly.
-- **Auto-Cleanup (TTL)**: Sessions automatically expire and are purged by MongoDB's background TTL index matching the `expiresAt` parameter.
+| Endpoint | Method | Description | Auth Required | Request Body / Params |
+| :--- | :--- | :--- | :--- | :--- |
+| `/register` | `POST` | Registers a new user and fires `onVerifyEmail` event. | No | `{ email, password }` |
+| `/verify-email/:token` | `GET` | Validates token, marks verified, sets cookie, returns access token. | No | `/:token` |
+| `/login` | `POST` | Authenticates email/password. Sets Refresh Cookie, returns Access Token. | No | `{ email, password }` |
+| `/refresh` | `POST` | Rotates refresh token. Generates new access token and rotated cookie. | No | *Requires Refresh Cookie* |
+| `/logout` | `POST` | Invalidates active refresh token, clears authentication cookies. | Yes | *Requires Refresh Cookie* |
+| `/forgot-password` | `POST` | Generates reset token and fires `onForgotPassword` event. | No | `{ email }` |
+| `/reset-password/:token` | `POST` | Resets password, invalidates all sessions for this user. | No | `/:token`, `{ password }` |
+| `/me` | `GET` | Fetches active authenticated user profile. | Yes | *Requires Bearer Header or Refresh Cookie* |
+| `/sessions` | `GET` | Retrieves list of all active sessions for the user. | Yes | *Requires Bearer Header or Refresh Cookie* |
+| `/sessions/:id` | `DELETE` | Revokes/Logs out a specific session ID. | Yes | *Requires Bearer Header or Refresh Cookie* |
+| `/sessions` | `DELETE` | Revokes all sessions for the user *except* the current one. | Yes | *Requires Bearer Header or Refresh Cookie* |
 
 ---
 
@@ -286,3 +438,11 @@ node test.js
 - [ ] Built-in API Rate Limiting
 - [ ] JWT Key Rotation (kid support)
 - [ ] OAuth Provider Lifecycle Hooks
+
+---
+
+## Philosophy
+
+`@notesify/auth` is intentionally designed as an **authentication engine**, not simply a collection of Express routes.
+
+The goal is to keep authentication modular, reusable, storage-independent, event-driven, and security-focused while allowing applications to integrate their own persistence, notification, and business logic layers without modifying the authentication core.
