@@ -60,7 +60,7 @@ npm link
 ### 2. Connect it to your Express app
 Run this command inside the root of your target Express application folder:
 ```bash
-npm link authimplementation
+npm link @notesify/auth
 ```
 
 ---
@@ -90,7 +90,7 @@ Import the core library and set up the Mongoose adapter in your app entrypoint:
 ```javascript
 import express from "express";
 import cookieParser from "cookie-parser";
-import { createAuth, MongooseStorageAdapter } from "authimplementation";
+import { createAuth, MongooseStorageAdapter } from "@notesify/auth";
 
 import User from "./models/User.js";
 import AuthSession from "./models/AuthSession.js"; // Created by package or custom schema
