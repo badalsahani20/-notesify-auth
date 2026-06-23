@@ -32,3 +32,12 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+
+# Local practice application files (only keep src/core, src/adapters, etc.)
+src/controllers/
+src/routes/
+src/middlewares/
+src/services/
+src/models/user.model.js
+src/app.js
